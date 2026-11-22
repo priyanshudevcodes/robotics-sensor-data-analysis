@@ -1,0 +1,130 @@
+import os
+import kagglehub
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# 1. Download dataset via kagglehub
+path = kagglehub.dataset_download("drsaeedmohsen/ucihar-dataset")
+print("Path to dataset files:", path)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+ACTIVITIES = [
+    "WALKING",
+    "WALKING_UPSTAIRS",
+    "WALKING_DOWNSTAIRS",
+    "SITTING",
+    "STANDING",
+    "LAYING"
+]
+SHORT_LABELS = ["Walking", "Upstairs", "Downstairs", "Sitting", "Standing", "Laying"]
+LABEL_TO_IDX = {name: idx for idx, name in enumerate(ACTIVITIES)}
+
+
+# 2. Locate the UCI HAR dataset directory inside the kagglehub path
+def find_dataset_dir(root_dir):
+    for root, dirs, files in os.walk(root_dir):
+        if (
+            os.path.isfile(os.path.join(root, "train", "X_train.txt"))
+            and os.path.isfile(os.path.join(root, "test", "X_test.txt"))
+            and os.path.isfile(os.path.join(root, "features.txt"))
+        ):
+            return root
+    raise FileNotFoundError(f"Could not find UCI HAR train/test files inside {root_dir}")
+
+
+# 3. Load CSVs and extract the 20 statistical features (X, Y, Z, Magnitude)
+def load_kaggle_method1(dataset_dir):
+    dataset_dir = find_dataset_dir(dataset_dir)
+    train_dir = os.path.join(dataset_dir, "train")
+    test_dir = os.path.join(dataset_dir, "test")
+
+    X_train = np.loadtxt(os.path.join(train_dir, "X_train.txt"), dtype=np.float64)
+    X_test = np.loadtxt(os.path.join(test_dir, "X_test.txt"), dtype=np.float64)
+    y_train = np.loadtxt(os.path.join(train_dir, "y_train.txt"), dtype=int) - 1
+    y_test = np.loadtxt(os.path.join(test_dir, "y_test.txt"), dtype=int) - 1
+
+    # Select the same 20 body-acceleration/magnitude statistics used by Method 1.
+    feature_names = []
+    with open(os.path.join(dataset_dir, "features.txt"), "r", encoding="utf-8") as feature_file:
+        for line in feature_file:
+            _, name = line.strip().split(maxsplit=1)
+            feature_names.append(name)
+
+    selected_names = [
+        "tBodyAcc-mean()-X", "tBodyAcc-std()-X", "tBodyAcc-max()-X", "tBodyAcc-min()-X", "tBodyAcc-energy()-X",
+        "tBodyAcc-mean()-Y", "tBodyAcc-std()-Y", "tBodyAcc-max()-Y", "tBodyAcc-min()-Y", "tBodyAcc-energy()-Y",
+        "tBodyAcc-mean()-Z", "tBodyAcc-std()-Z", "tBodyAcc-max()-Z", "tBodyAcc-min()-Z", "tBodyAcc-energy()-Z",
+        "tBodyAccMag-mean()", "tBodyAccMag-std()", "tBodyAccMag-max()", "tBodyAccMag-min()", "tBodyAccMag-energy()"
+    ]
+
+    missing_names = [name for name in selected_names if name not in feature_names]
+    if missing_names:
+        raise ValueError(f"Missing expected UCI HAR features: {missing_names}")
+
+    feature_indices = [feature_names.index(name) for name in selected_names]
+    X_train = X_train[:, feature_indices]
+    X_test = X_test[:, feature_indices]
+
+    print(f"X_train shape: {X_train.shape} | y_train shape: {y_train.shape}")
+    print(f"X_test shape : {X_test.shape} | y_test shape : {y_test.shape}")
+    return X_train, y_train, X_test, y_test
+
+
+# 4. Pure NumPy K-Nearest Neighbors classifier
+def predict_knn(X_tr, y_tr, X_te, k=5):
+    preds = []
+    for sample in X_te:
+        distances = np.linalg.norm(X_tr - sample, axis=1)
+        nearest_idx = np.argsort(distances)[:k]
+        nearest_labels = y_tr[nearest_idx]
+        counts = np.bincount(nearest_labels, minlength=len(ACTIVITIES))
+        preds.append(np.argmax(counts))
+    return np.array(preds)
+
+
+print("\nLoading Kaggle UCI HAR dataset (Method 1)...")
+X_train, y_train, X_test, y_test = load_kaggle_method1(path)
+
+# 5. Z-score normalization using training statistics
+train_mean = X_train.mean(axis=0)
+train_std = X_train.std(axis=0) + 1e-8
+X_train_norm = (X_train - train_mean) / train_std
+X_test_norm = (X_test - train_mean) / train_std
+
+# 6. Run kNN classification
+print("Running Method 1 classification...")
+y_pred = predict_knn(X_train_norm, y_train, X_test_norm, k=5)
+
+# 7. Overall and Per-Activity Accuracy
+accuracy = np.mean(y_pred == y_test)
+print(f"\nMethod 1 Overall Accuracy: {accuracy * 100:.2f}%")
+
+cm = pd.crosstab(
+    pd.Series(y_test, name="Actual"),
+    pd.Series(y_pred, name="Predicted")
+).reindex(index=range(6), columns=range(6), fill_value=0)
+
+print("\nConfusion Matrix:\n", cm)
+
+cm_array = cm.to_numpy()
+per_class_acc = cm_array.diagonal() / cm_array.sum(axis=1)
+print("\nPer-Activity Accuracy (Method 1):")
+for name, acc in zip(SHORT_LABELS, per_class_acc):
+    print(f"  {name:<12}: {acc * 100:.2f}%")
+
+# 8. Save Confusion Matrix image next to your script
+plt.figure(figsize=(7, 6))
+plt.imshow(cm_array, cmap="Blues")
+plt.title(f"Method 1 Confusion Matrix (Acc: {accuracy * 100:.1f}%)")
+plt.xticks(range(6), SHORT_LABELS, rotation=45)
+plt.yticks(range(6), SHORT_LABELS)
+plt.colorbar()
+plt.tight_layout()
+output_path = os.path.join(BASE_DIR, "confusion_matrix_method1.png")
+plt.savefig(output_path, dpi=150)
+plt.close()
+print(f"\nSaved confusion matrix to: {output_path}")
